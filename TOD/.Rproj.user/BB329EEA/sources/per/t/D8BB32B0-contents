@@ -1,0 +1,46 @@
+---
+title: "Week4"
+author: "Luming"
+date: "`r Sys.Date()`" # automate the date
+output:
+  html_document:
+    toc: true # add table of contents
+    theme: paper # experiment with different built-in themes
+    number_sections: true
+    toc_float: true
+    toc_depth: 2 # set depth to the table of contents
+    code_folding: hide
+bibliography: references.bib
+---
+```{r message = FALSE, results = FALSE}
+# Check if data folder already exists, if not, create it
+if (!dir.exists("data")){
+  dir.create("data")
+}
+
+# create an empty .bib file to hold references
+file.create("references.bib")
+```
+
+yay [@kitamura1990panel]
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+## Subsection 1
+
+## Subsection 2
+
+### Ordered List:
+1. 
+2.
+3.
+
+### Unordered List:
+ + Buller
+
+### References
+

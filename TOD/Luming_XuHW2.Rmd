@@ -1,0 +1,431 @@
+---
+title: "TOD Areas Are Gaining Attention: The Perfect Time for Developers to Invest"
+author: "By LUMING XU"
+date: "`r Sys.Date()` (A draft version)"
+output:
+  html_document:
+    toc: true
+    theme: journal
+    toc_float: true
+    toc_depth: 2
+    code_folding: hide
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r setup_packages, warning = FALSE, message = FALSE}
+# Load packages and functions
+
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+library(gridExtra)
+library(cowplot)
+library(geosphere)
+library(dplyr)
+
+options(scipen=999) # a penalty for printing scientific notation
+options(tigris_class = "sf") # tells the tigris package to return spatial data as an sf object
+
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+```
+
+```{r load_api, warning = FALSE, eval = FALSE}
+# Load API
+census_api_key("e62580f74ef222beadd9dd2fbaf48ff130b31c4a", overwrite = TRUE)
+```
+
+```{r get_censusdata, cache = TRUE, message = FALSE, warning = FALSE, include = FALSE}
+# 2012 Census Data
+tracts12 <- 
+  get_acs(geography = "tract", 
+          variables = c("B25026_001E","B19013_001E",
+                        "B25058_001E","B25002_001E"), 
+          year=2012, 
+          state=06, 
+          county=075, 
+          geometry=TRUE, 
+          output="wide") %>%
+  st_transform('EPSG:7132') %>%
+  filter(!str_detect(GEOID, "06075980401|06075990100|06075017902")) %>%
+  rename(TotalPop = B25026_001E, 
+         MedHHInc = B19013_001E, 
+         MedRent = B25058_001E,
+         TotalHU = B25002_001E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(year = "2012")
+# 2022 Census Data
+tracts22 <- 
+  get_acs(geography = "tract", 
+          variables = c("B25026_001E","B19013_001E",
+                        "B25058_001E","B25002_001E"), 
+          year=2022, 
+          state=06, 
+          county=075, 
+          geometry=TRUE, 
+          output="wide") %>%
+  st_transform('EPSG:7132') %>%
+  filter(!str_detect(GEOID, "06075980401|06075990100|06075017902|06075017903")) %>%
+  rename(TotalPop = B25026_001E, 
+         MedHHInc = B19013_001E, 
+         MedRent = B25058_001E,
+         TotalHU = B25002_001E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(year = "2022")
+
+# combine the data
+allTracts <- rbind(tracts12,tracts22)
+```
+
+```{r get_transitdata, cache = TRUE, message = FALSE, warning = FALSE, include = FALSE}
+# Passenger Rail Stations (2019)
+Muni_Metro <- st_read("https://opendata.arcgis.com/datasets/efd75b7bb3c04dbda06c6e7cd73e9336_0.geojson") %>%
+  st_transform(st_crs(tracts12))
+```
+
+```{r transitdata, cache = TRUE, message = FALSE, warning = FALSE, include = FALSE}
+# Select what I need
+Muni_Metro <- st_filter(Muni_Metro, st_union(tracts12)) %>%
+  mutate(Line = "Muni_Metro") %>%
+  dplyr::select(station_na, mode, Line)
+# 0.5 mile buffer
+stopBuffer <- st_buffer(Muni_Metro, 2640)
+
+stopUnion <- st_union(st_buffer(Muni_Metro, 2640))
+
+muniBuffers <- 
+  rbind(
+     stopBuffer %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+     stopUnion %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+# Using the `sf` Package for Spatial operations
+buffer <- filter(muniBuffers, Legend=="Unioned Buffer")
+```
+
+```{r centroid, warning = FALSE, message = FALSE}
+# Spatial intersection with `st_centroid()` on polygon centroids
+# 2012
+selectCentroids.12 <-
+  st_centroid(tracts12)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts22, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Select by Centroids_2012")
+# 2022
+selectCentroids.22 <-
+  st_centroid(tracts22)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts22, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Select by Centroids_2022")
+```
+
+```{r alltracts_group, warning = FALSE, message = FALSE}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2012", MedRent * 1.24, MedRent)) 
+```
+
+```{r MRB}
+# Compute MRB
+muni_MRB <- multipleRingBuffer(st_union(Muni_Metro),
+                                maxDistance = 18480,
+                                interval =  2640)
+```
+
+```{r distance_summary, cache = TRUE, warning = FALSE, message = FALSE}
+# Summarizing data
+# 2012 data
+tracts12.rings <- tracts12 %>% 
+  select(GEOID, year) %>% 
+  st_centroid() %>% 
+  st_join(muni_MRB, join = st_intersects) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(tracts12, GEOID, MedRent, year), 
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+
+tracts12.rings.summary <- st_drop_geometry(tracts12.rings) %>%
+    group_by(distance, year) %>%
+    summarize(Mean_Rent = mean(MedRent, na.rm=T))
+# 2022 data
+tracts22.rings <- tracts22 %>% 
+  select(GEOID, year) %>% 
+  st_centroid() %>% 
+  st_join(muni_MRB, join = st_intersects) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(tracts22, GEOID, MedRent, year), 
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+
+tracts22.rings.summary <- st_drop_geometry(tracts22.rings) %>%
+    group_by(distance, year) %>%
+    summarize(Mean_Rent = mean(MedRent, na.rm=T))
+
+# combine data
+tracts.rings.summary <- rbind(tracts12.rings.summary, tracts22.rings.summary)
+```
+
+The low rent of TOD areas in San Francisco provides best opportunities for developers to get into the field.
+
+```{r line_graph}
+# plot
+ggplot(tracts.rings.summary,
+       aes(distance, Mean_Rent, colour=year)) +
+      geom_point(size=2) +
+  geom_line(size=1) +
+  scale_color_manual(values = c("#7bccc4", "#0868ac"))+
+  labs(title = "Mean rent as a function of distance to subway stations",
+       subtitle = "San Francisco, 2012 & 2022") +
+  plotTheme()
+```
+
+# Background of the Story 
++ WE: a data analysis firm
++ CLIENT: a developer
++ AIM: TOD lands in San Francisco are available to develop - help our client evaluate whether to invest
++ BIG IDEA: best time for the developer to invest in TOD for apartments since the decreasing gap in rent and income
+
+# Now My Story Begins!
+
+The [Car ownership statistics 2024](https://www.consumeraffairs.com/automotive/car-ownership-statistics.html#:~:text=A%20survey%20conducted%20in%20March%202024%20found%20that,shared%20information%20about%20their%20access%20to%20other%20vehicles.) reports that 82% of people in the United States own a vehicle in 2024. Car ownership of households rise from 87.1% to 91.7% from 2018 to 2022, showing a constant growing trend.
+
+When car ownership tend to increase further, is the TOD area a wise choice for our developer to gain long-term benefits? Or waiting for an opportunity to develop new districts far from railway stations is better? 
+
+```{r multiple_visualizations}
+create_plot <- function(data, aes_fill, label) {
+  ggplot(data) +
+    geom_sf(data = st_union(tracts22)) +
+    geom_sf(aes(fill = q5(.data[[aes_fill]]))) +
+    geom_sf(data = buffer, fill = "transparent", color = "red") +
+    scale_fill_manual(values = palette5,
+                      labels = qBr(data, aes_fill),
+                      name = label) +
+    facet_wrap(~year) +
+    mapTheme() + 
+    labs(title = label) +
+    theme(plot.title = element_text(size=12, face = "bold"),
+          strip.text.x = element_text(size = 10, margin = margin(0.05,0,0.05,0, "cm")),
+          legend.position = "bottom",
+          legend.key.size = unit(0.2, "cm"),
+          legend.text = element_text(size = 8),
+          legend.title = element_blank(),
+          legend.margin = margin(t = -5)) +
+    guides(fill = guide_legend(nrow = 1))
+}
+
+# Generate each plot using the function
+plot_a <- create_plot(allTracts.group, "TotalPop", "Total Population") +
+  theme(plot.margin = margin(25, 0, 0, 0))
+plot_b <- create_plot(allTracts.group, "MedRent.inf", "Median Rent (Real Dollars)") +
+  theme(plot.margin = margin(25, 0, 0, 0))
+plot_c <- create_plot(allTracts.group, "MedHHInc", "Median Household Income") +
+  theme(plot.margin = margin(10, 0, 20, 0))
+plot_d <- create_plot(allTracts.group, "TotalHU", "Total Housing Units") +
+  theme(plot.margin = margin(10, 0, 20, 0))
+
+# Combine all plots into a grid layout
+combined_plots <- plot_grid(plot_a, plot_b, plot_c, plot_d, ncol = 2)
+
+# Add title and caption
+final_plot <- ggdraw() +
+  draw_plot(combined_plots) +
+  draw_label("Four small-multiple visualizations across time and space", x = 0.5, y = 0.98, size = 16) +
+  draw_label("Calculation method: quintile breaks", x = 0.5, y = 0.02, fontface = 'italic', size = 9)
+
+# Print the final plot with title and caption
+print(final_plot)
+```
+
+In San Francisco, the answer seems undeniable to put money in new districts on the surface. By taking a general look into the indicators related to housing and rent, it shows a decaying historic center and the rising of some new districts. From a total population perspective, the city's historic center in the northeast quadrant is experiencing a decline in population, while the southeast corner is seeing growth. The median rent and household income in San Francisco exhibit similar patterns, with a general upward trend and rapid growth in the central area, including Noe Valley, and the western area, including the Sunset District. Total housing units show a general decline from 2012 to 2022 while the western, south central, and northern parts maintained a high level, where the residential districts and high-tech companies locate. The indicators inside and outside TOD areas do not show a significant difference on the maps, however, do we miss something? 
+
+Does the rising of new districts contribute to the further development? Are the TOD area not worth investing because of its current conditions? When delving deeper into policy and data across time and space, the results suggest a different insight.
+
+## TOD as an important policy for sustainable urban growth
+The increasing cars contribute to high congestion, urban sprawl, increased carbon emissions, and significant personal costs associated with car ownership and maintenance.  [Transit-oriented development (TOD)](https://www.transportation.gov/buildamerica/TOD) has gained attention as a policy promoting sustainable urban growth, characterized by high-density, mixed-use areas centered around transit hubs. San Francisco’s railway system, the seventh-highest ridership transit system in the U.S., saw 142,168,200 rides in 2023, reflecting the high demand for public transit. Therefore, the development of transit-rich areas is a main trend for future sustainable urban growth.
+
+## A high demand for public transit from young households
+
+```{r table, message = FALSE}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+  group_by(year, TOD) %>%
+  summarize(Rent = round(mean(MedRent, na.rm = T), 2),
+            Population = round(mean(TotalPop, na.rm = T), 0),
+            Income = round(mean(MedHHInc, na.rm = T), 2),
+            Housing = round(mean(TotalHU, na.rm = T), 0)) %>%
+  ungroup()
+```
+
+```{r multiple_tables}
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  ggplot(aes(year, Value, fill = TOD)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Variable, scales = "free", ncol=5) +
+  scale_fill_manual(values = c("#bae4bc", "#43a2ca")) +
+  labs(title = "Indicator differences across time and space") +
+  plotTheme() + 
+  theme(legend.position="bottom")
+```
+
+Of the four indicators, the bar chart highlights a rapid growth in household income and rent from 2012 to 2022, while housing units and population declined slightly, suggesting a growing economy alongside a stable population. A point which needs special attention is that the TOD areas tend to have higher housing units but lower population, indicating an increased use of housings with less residents. Taking the lower income and rent within TOD areas into consideration, young commuters tend to live alone or with 2-3 roommates near public transits to earn a living. Therefore, the key concern is not to stop developing TOD areas but to determine target consumers of housings and grab the potential market share. With the further economic growth, single and two-person households, who are the main GDP producers, will certainly have an increasing demand for transit-rich households.
+
+## An increased willingness to pay for TOD among higher-income households
+
+```{r table_plot}
+allTracts.Diff <- allTracts.Summary %>%
+  pivot_wider(names_from = TOD, values_from = c(Rent, Population, Income, Housing))
+allTracts.Diff <- allTracts.Diff %>%
+  mutate(Diff_Rent = 100*(Rent_TOD - `Rent_Non-TOD`)/`Rent_Non-TOD`,
+         Diff_Population = 100*(Population_TOD - `Population_Non-TOD`)/`Population_Non-TOD`,
+         Diff_Income = 100*(Income_TOD - `Income_Non-TOD`)/`Income_Non-TOD`,
+         Diff_Housing = 100*(Housing_TOD - `Housing_Non-TOD`)/`Housing_Non-TOD`)%>%
+  select(year, starts_with("Diff_"))
+
+allTracts.Diff <- allTracts.Diff %>%
+  rename(Rent = Diff_Rent,
+         Population = Diff_Population,
+         Income = Diff_Income,
+         Housing = Diff_Housing)
+
+allTracts.Summary.Diff <- bind_rows(
+  allTracts.Summary,
+  allTracts.Diff %>%
+    mutate(TOD = "Difference(%)"))
+
+allTracts.Summary.Diff %>%
+  unite(year.TOD, year, TOD, sep = ": ", remove = T) %>%
+  gather(Variable, Value, -year.TOD) %>%
+  mutate(Value = round(Value, 2)) %>%
+  spread(year.TOD, Value) %>%
+  kable(caption = "A TOD indicator table across time and space") %>%
+  kable_styling()
+```
+
+Comparing the differences between the four indicators between TOD and non-TOD areas, the result shows an increased preference from higher-income households for transit-rich neighborhoods. The gap in both housing units and population saw an 8-11% decline over time, suggesting a trend of fewer people living in TOD areas. Meanwhile, the gap in income and rent across space narrowed, meaning that there were some households with higher income would like to pay higher rent in TOD areas. Though the rent and income inside TOD areas are still lower than the outside, the narrowed gap provides a good sign for our developer to get in and prepare for the coming of the high-income households and the further growth of the rent in TOD areas.
+
+## Lower rent provides an opportunity for developers to get into the field
+
+```{r line_graph2}
+# plot
+ggplot(tracts.rings.summary,
+       aes(distance, Mean_Rent, colour=year)) +
+      geom_point(size=2) +
+  geom_line(size=1) +
+  scale_color_manual(values = c("#7bccc4", "#0868ac"))+
+  labs(title = "Mean rent as a function of distance to subway stations",
+       subtitle = "San Francisco, 2012 & 2022") +
+  plotTheme()
+```
+
+Guided by the big rent theory, the line graph illustrates how rent and housing demand change with increasing distance from rail stations. There is a significant difference that the rent beyond two miles far from railway stations declined in 2012 while the rent grew faster in 2022. The result suggests an increasing popularity of the residential districts far from railway stations, which means a higher difficulty for developers to join the market of this field. However, the low level of the rent in TOD areas offers a good investment opportunity with the increasing demand from young and higher-income households.
+
+Though TOD serves as a good option for developing single households, some areas work better for tourist infrastructures instead of houses.
+
+## Not wise to develop housings in tourism spots within the TOD areas
+
+```{r}
+# relate centroids of tracts to the buffer
+Centroids.12 <- st_centroid(tracts12)[buffer,] %>%
+                            dplyr::select(-MedHHInc, -TotalHU)
+buffer_centroids.12 <- st_join(stopBuffer %>%
+                            mutate(ID = seq(1, nrow(stopBuffer))) %>%
+                            dplyr::select(-mode),
+                          Centroids.12,
+                          join = st_intersects)
+Centroids.22 <- st_centroid(tracts22)[buffer,] %>%
+                            dplyr::select(-MedHHInc, -TotalHU)
+buffer_centroids.22 <- st_join(stopBuffer %>%
+                            mutate(ID = seq(1, nrow(stopBuffer))) %>%
+                            dplyr::select(-mode),
+                          Centroids.22,
+                          join = st_intersects)
+# calculate pop and rent of each station
+Muni_centroids.12 <- buffer_centroids.12 %>%
+  group_by(ID) %>%
+  summarise(Pop = mean(TotalPop, na.rm = TRUE),
+            Rent = mean(MedRent, na.rm = TRUE)) %>%
+  mutate(year = "2012")
+Muni_centroids.22 <- buffer_centroids.22 %>%
+  group_by(ID) %>%
+  summarise(Pop = mean(TotalPop, na.rm = TRUE),
+            Rent = mean(MedRent, na.rm = TRUE)) %>%
+  mutate(year = "2022")
+
+# relate the results to rail stations
+Muni_centroids.12 <- cbind(Muni_Metro %>%
+                          dplyr::select(-Line),
+                        Muni_centroids.12 %>%
+                          st_drop_geometry() %>%
+                          dplyr::select(Pop, Rent, year))
+Muni_centroids.22 <- cbind(Muni_Metro %>%
+                          dplyr::select(-Line),
+                        Muni_centroids.22 %>%
+                          st_drop_geometry() %>%
+                          dplyr::select(Pop, Rent, year))
+Muni_centroids <- rbind(Muni_centroids.12,Muni_centroids.22)
+```
+
+
+```{r bubble_maps}
+# plot bubble maps
+plot1.3 <- ggplot() +
+  geom_sf(data = tracts12, fill = "grey95", color = "white")+
+  geom_sf(data = tracts22, fill = "grey95", color = "white")+
+  geom_sf(data = Muni_centroids, aes(size = q5(Pop),color = q5(Pop))) +
+  scale_color_manual(values = scales::alpha(palette5, 0.3)) +
+  scale_size_manual(values = c(0.5,1.5,2.5,3.5,4.5)) +
+  facet_wrap(~year) +
+    mapTheme()+
+  labs(title = "Graduated Symbol Maps of Population", subtitle = "0.5 mile of each transit station, 2021-2022")+
+  theme(plot.title = element_text(size=18))
+
+plot1.3
+```
+
+```{r buble_maps_2}
+plot2.3 <- ggplot() +
+  geom_sf(data = tracts12, fill = "grey95", color = "white")+
+  geom_sf(data = tracts22, fill = "grey95", color = "white")+
+  geom_sf(data = Muni_centroids, aes(size = q5(Rent),color = q5(Rent))) +
+  scale_color_manual(values = scales::alpha(palette5, 0.3)) +
+  scale_size_manual(values = c(0.5,1.5,2.5,3.5,4.5)) +
+  facet_wrap(~year) +
+    mapTheme()+
+  labs(title = "Graduated Symbol Maps of Rent", subtitle = "0.5 mile of each transit station, 2021-2022")+
+  theme(plot.title = element_text(size=18))
+
+plot2.3
+```
+
+Graduated symbol maps provide a clear visualization of the changes and distribution of population and rent in TOD areas over time. The rent map shows rapid growth in rent across the central, western, and northeastern parts of TOD areas. However, compared to the population map, the northeastern region exhibits high rent but low population. This area includes popular tourist attractions such as Fisherman’s Wharf, Embarcadero, and Washington Square, where a thriving tourism industry has driven up rent, while fewer residents choose to live there. It's not a wise choice to develop housings in such TOD area even though it has higher rent.
+
+# Best time to get into the TOD field
+
+The developer should develop single-household neighborhoods within TOD areas because of the sustainable goals, increasing demand, lower rent and avoid the areas with potential tourism opportunities, capitalizing on the first-mover advantage in a rapidly changing land-use market.
+
+
